@@ -501,6 +501,9 @@ class Gemma4ForCausalLM(nnx.Module):
         multimodal_mappings = {f"language_model.{k}": v for k, v in mappings.items()}
         mappings.update(multimodal_mappings)
 
+        model_lm_mappings = {k.replace("model.", "model.language_model."): v for k, v in mappings.items() if k.startswith("model.")}
+        mappings.update(model_lm_mappings)
+
         return mappings
 
     def _create_layer_mappings(self, layer_idx: int) -> dict:
