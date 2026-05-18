@@ -104,7 +104,8 @@ class Gemma4Attention(nnx.Module):
             rope_params = rope_parameters[self.layer_type]
             rope_theta = rope_params.get("rope_theta", getattr(config, "rope_theta", 10000.0))
             rope_scaling = rope_params.get("rope_scaling", getattr(config, "rope_scaling", None))
-            rope_proportion = rope_params.get("partial_rotary_factor", 1.0)
+            default_prop = 0.25 if not self.is_sliding else 1.0
+            rope_proportion = rope_params.get("partial_rotary_factor", default_prop)
         else:
             rope_theta = getattr(config, "rope_local_base_freq", 10000.0) if self.is_sliding else getattr(config, "rope_theta", 1000000.0)
             rope_scaling = getattr(config, "rope_scaling", None)
@@ -183,7 +184,7 @@ class Gemma4Attention(nnx.Module):
             max_position=max_position_embeddings,
             base=rope_theta,
             is_neox_style=True,
-            rope_scaling=rope_scaling,
+            rope_scaling=None,
             dtype=dtype,
             partial_rotary_factor=rope_proportion,
         )
@@ -434,21 +435,21 @@ class Gemma4ForCausalLM(nnx.Module):
         dtype: jnp.dtype = jnp.bfloat16,
     ):
         self.mesh = mesh
-        self.config = config
+        self.config = getattr(config, "text_config", config)
         self.dtype = dtype
         logger.info("Gemma4ForCausalLM config dtype: %s", self.dtype)
-        self.model = Gemma4Model(config, dtype=self.dtype, mesh=mesh)
+        self.model = Gemma4Model(self.config, dtype=self.dtype, mesh=mesh)
         if not getattr(self.config, "tie_word_embeddings", True):
             self.lm_head = ParallelLMHead(
-                config.vocab_size,
-                config.hidden_size,
+                self.config.vocab_size,
+                self.config.hidden_size,
                 dtype=self.dtype,
                 param_dtype=self.dtype,
                 kernel_axes=("tensor", None),
             )
         self.logits_processor = LogitsProcessor(
-            config.vocab_size,
-            soft_cap=getattr(config, "final_logit_softcapping", 0.0),
+            self.config.vocab_size,
+            soft_cap=getattr(self.config, "final_logit_softcapping", 0.0),
             mesh=self.mesh,
         )
         self.capture_aux_hidden_states = False
@@ -464,6 +465,15 @@ class Gemma4ForCausalLM(nnx.Module):
         weight_mappings = self._create_gemma4_weight_mappings()
 
         loader.load_weights_from_safetensors(weight_mappings)
+
+        for layer in self.model.layers:
+            layer.layer_scalar.value = jax.device_put(jnp.ones((1,), dtype=self.dtype), jax.sharding.NamedSharding(self.mesh, P()))
+
+        if hasattr(self, "lm_head"):
+            if isinstance(self.lm_head.embedding.value, jax.ShapeDtypeStruct):
+                logger.info("Tying lm_head weights to embed_tokens (lm_head not in safetensors)")
+                self.lm_head.embedding = self.model.embed_tokens.embedding
+
         logger.info("Gemma4 weights loaded successfully!")
 
     def _create_gemma4_weight_mappings(self) -> dict:
@@ -478,7 +488,7 @@ class Gemma4ForCausalLM(nnx.Module):
             ),
         }
 
-        if not getattr(self.config, "tie_word_embeddings", True):
+        if hasattr(self, "lm_head"):
             mappings["lm_head.weight"] = WeightMapping(
                 target_path="lm_head.embedding", sharding=("tensor", None), transpose=False
             )
@@ -487,6 +497,9 @@ class Gemma4ForCausalLM(nnx.Module):
         for layer_idx in range(num_layers):
             layer_mappings = self._create_layer_mappings(layer_idx)
             mappings.update(layer_mappings)
+
+        multimodal_mappings = {f"language_model.{k}": v for k, v in mappings.items()}
+        mappings.update(multimodal_mappings)
 
         return mappings
 
@@ -628,4 +641,8 @@ class Gemma4ForCausalLM(nnx.Module):
         return output, layers_kv_fused, layers_callback_flag, None
 
 
-EntryClass = Gemma4ForCausalLM
+class Gemma4ForConditionalGeneration(Gemma4ForCausalLM):
+    pass
+
+
+EntryClass = [Gemma4ForCausalLM, Gemma4ForConditionalGeneration]
