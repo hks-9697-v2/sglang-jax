@@ -208,6 +208,8 @@ class ModelConfig:
                 self.num_hidden_layers = model_layer_nums
                 # Also update hf_config to ensure consistency across all components
                 self.hf_config.num_hidden_layers = model_layer_nums
+                if hasattr(self, "hf_text_config") and self.hf_text_config is not None:
+                    self.hf_text_config.num_hidden_layers = model_layer_nums
 
         # Cache attributes
         self.hf_eos_token_id = self.get_hf_eos_token_id()
