@@ -212,7 +212,7 @@ class GemmaRMSNorm(nnx.Module):
         x = x.astype(jnp.float32)
         variance = jnp.mean(lax.square(x), axis=-1, keepdims=True)
         x = x * lax.rsqrt(variance + self.epsilon)
-        x = x * (1.0 + jnp.asarray(self.weight, jnp.float32))
+        x = x * jnp.asarray(self.weight, jnp.float32)
         x = x.astype(orig_dtype)
         return x if residual is None else (x, residual)
 

@@ -10,7 +10,7 @@ from transformers import PretrainedConfig
 
 from sgl_jax.srt.configs.model_config import ModelConfig
 from sgl_jax.srt.layers.embeddings import Embed, ParallelLMHead, get_rope
-from sgl_jax.srt.layers.layernorm import RMSNorm
+from sgl_jax.srt.layers.layernorm import GemmaRMSNorm, RMSNorm
 from sgl_jax.srt.layers.linear import LinearBase
 from sgl_jax.srt.layers.logits_processor import LogitsMetadata, LogitsProcessor
 from sgl_jax.srt.layers.radix_attention import RadixAttention
@@ -135,8 +135,8 @@ class Gemma4Attention(nnx.Module):
             mesh=mesh,
             scope_name="q_proj",
         )
-        self.q_norm = RMSNorm(
-            self.head_dim, epsilon=rms_norm_eps, param_dtype=dtype, scope_name="q_norm"
+        self.q_norm = GemmaRMSNorm(
+            self.head_dim, epsilon=rms_norm_eps
         )
 
         self.k_proj = LinearBase(
@@ -148,8 +148,8 @@ class Gemma4Attention(nnx.Module):
             mesh=mesh,
             scope_name="k_proj",
         )
-        self.k_norm = RMSNorm(
-            self.head_dim, epsilon=rms_norm_eps, param_dtype=dtype, scope_name="k_norm"
+        self.k_norm = GemmaRMSNorm(
+            self.head_dim, epsilon=rms_norm_eps
         )
 
         if self.use_k_eq_v:
@@ -187,6 +187,7 @@ class Gemma4Attention(nnx.Module):
             rope_scaling=None,
             dtype=dtype,
             partial_rotary_factor=rope_proportion,
+            base_div_dim=self.head_dim,
         )
 
         self.attn = RadixAttention(
@@ -259,11 +260,9 @@ class Gemma4DecoderLayer(nnx.Module):
 
         self.layer_scalar = nnx.Param(jnp.ones((1,), dtype=dtype))
 
-        self.input_layernorm = RMSNorm(
+        self.input_layernorm = GemmaRMSNorm(
             config.hidden_size,
             epsilon=rms_norm_eps,
-            param_dtype=dtype,
-            scope_name="input_layernorm",
         )
         self.self_attn = Gemma4Attention(
             config=config,
@@ -273,17 +272,13 @@ class Gemma4DecoderLayer(nnx.Module):
             dtype=dtype,
             mesh=mesh,
         )
-        self.post_attention_layernorm = RMSNorm(
+        self.post_attention_layernorm = GemmaRMSNorm(
             config.hidden_size,
             epsilon=rms_norm_eps,
-            param_dtype=dtype,
-            scope_name="post_attention_layernorm",
         )
-        self.pre_feedforward_layernorm = RMSNorm(
+        self.pre_feedforward_layernorm = GemmaRMSNorm(
             config.hidden_size,
             epsilon=rms_norm_eps,
-            param_dtype=dtype,
-            scope_name="pre_feedforward_layernorm",
         )
         self.mlp = Gemma4MLP(
             hidden_size=config.hidden_size,
@@ -292,11 +287,9 @@ class Gemma4DecoderLayer(nnx.Module):
             dtype=dtype,
             mesh=mesh,
         )
-        self.post_feedforward_layernorm = RMSNorm(
+        self.post_feedforward_layernorm = GemmaRMSNorm(
             config.hidden_size,
             epsilon=rms_norm_eps,
-            param_dtype=dtype,
-            scope_name="post_feedforward_layernorm",
         )
 
     def __call__(
@@ -305,16 +298,11 @@ class Gemma4DecoderLayer(nnx.Module):
         hidden_states: jax.Array,
         forward_batch: ForwardBatch,
         token_to_kv_pool: KVCache,
-        residual: jax.Array | None = None,
     ):
         layer_callback_flag = []
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
-        else:
-            hidden_states += residual
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+        jax.debug.print("[SGLANG LAYER {id}] input_layernorm - mean: {m}, std: {s}, min: {min_val}, max: {max_val}", id=self.layer_id, m=jnp.mean(hidden_states[:2]), s=jnp.std(hidden_states[:2]), min_val=jnp.min(hidden_states[:2]), max_val=jnp.max(hidden_states[:2]))
 
         layer_norm_callback_flag = precision_tracer.jit_pure_callback_record(
             hidden_states, "input_layernorm_output", "INPUT_LAYERNORM", self.layer_id
@@ -327,29 +315,31 @@ class Gemma4DecoderLayer(nnx.Module):
             forward_batch=forward_batch,
             token_to_kv_pool=token_to_kv_pool,
         )
+        jax.debug.print("[SGLANG LAYER {id}] self_attn - mean: {m}, std: {s}, min: {min_val}, max: {max_val}", id=self.layer_id, m=jnp.mean(hidden_states[:2]), s=jnp.std(hidden_states[:2]), min_val=jnp.min(hidden_states[:2]), max_val=jnp.max(hidden_states[:2]))
 
         attn_callback_flag = precision_tracer.jit_pure_callback_record(
             hidden_states, "self_attn_output", "SELF_ATTN", self.layer_id
         )
         layer_callback_flag.append(attn_callback_flag)
 
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states += residual
+        attn_output = self.post_attention_layernorm(hidden_states)
+        hidden_states = residual + attn_output
         residual = hidden_states
 
-        hidden_states = self.pre_feedforward_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
-        hidden_states = self.post_feedforward_layernorm(hidden_states)
-        hidden_states += residual
+        mlp_input = self.pre_feedforward_layernorm(hidden_states)
+        mlp_output = self.mlp(mlp_input)
+        mlp_output = self.post_feedforward_layernorm(mlp_output)
+        outputs = residual + mlp_output
 
-        hidden_states = hidden_states * self.layer_scalar.value
+        outputs = outputs * self.layer_scalar.value
+        jax.debug.print("[SGLANG LAYER {id}] output - mean: {m}, std: {s}, min: {min_val}, max: {max_val}", id=self.layer_id, m=jnp.mean(outputs[:2]), s=jnp.std(outputs[:2]), min_val=jnp.min(outputs[:2]), max_val=jnp.max(outputs[:2]))
 
         mlp_callback_flag = precision_tracer.jit_pure_callback_record(
-            hidden_states, "mlp_output", "MLP", self.layer_id
+            outputs, "mlp_output", "MLP", self.layer_id
         )
         layer_callback_flag.append(mlp_callback_flag)
 
-        return hidden_states, residual, kv_fused, layer_callback_flag
+        return outputs, kv_fused, layer_callback_flag
 
 
 class Gemma4Model(nnx.Module):
@@ -380,11 +370,9 @@ class Gemma4Model(nnx.Module):
             ]
         )
 
-        self.norm = RMSNorm(
+        self.norm = GemmaRMSNorm(
             config.hidden_size,
             epsilon=getattr(config, "rms_norm_eps", 1e-6),
-            param_dtype=dtype,
-            scope_name="norm",
         )
         self.hidden_size = config.hidden_size
         self.layers_to_capture = []
@@ -394,7 +382,7 @@ class Gemma4Model(nnx.Module):
         forward_batch: ForwardBatch,
         token_to_kv_pool: KVCache,
     ):
-        residual = None
+        jax.debug.print("[SGLANG INPUT IDS] {}", forward_batch.input_ids)
         hidden_states = self.embed_tokens(forward_batch.input_ids)
         hidden_states *= jnp.array([self.hidden_size**0.5], dtype=hidden_states.dtype)
 
@@ -403,21 +391,16 @@ class Gemma4Model(nnx.Module):
         aux_hidden_states = []
         for layer_id, layer in enumerate(self.layers):
             if layer_id in self.layers_to_capture:
-                aux_hidden_states.append(
-                    hidden_states + residual if residual is not None else hidden_states
-                )
-            hidden_states, residual, kv_fused, callback_flag = layer(
+                aux_hidden_states.append(hidden_states)
+            hidden_states, kv_fused, callback_flag = layer(
                 forward_batch.positions,
                 hidden_states,
                 forward_batch,
                 token_to_kv_pool,
-                residual,
             )
             layers_kv_fused.append(kv_fused)
             layers_callback_flag.extend(callback_flag)
 
-        if residual is not None:
-            hidden_states += residual
         hidden_states = self.norm(hidden_states)
 
         callback_flag = precision_tracer.jit_pure_callback_record(
@@ -484,7 +467,7 @@ class Gemma4ForCausalLM(nnx.Module):
                 transpose=False,
             ),
             "model.norm.weight": WeightMapping(
-                target_path="model.norm.scale", sharding=(None,), transpose=False
+                target_path="model.norm.weight", sharding=(None,), transpose=False
             ),
         }
 
@@ -517,22 +500,22 @@ class Gemma4ForCausalLM(nnx.Module):
 
         mappings = {
             f"{prefix}.input_layernorm.weight": WeightMapping(
-                target_path=f"{target_prefix}.input_layernorm.scale",
+                target_path=f"{target_prefix}.input_layernorm.weight",
                 sharding=(None,),
                 transpose=False,
             ),
             f"{prefix}.post_attention_layernorm.weight": WeightMapping(
-                target_path=f"{target_prefix}.post_attention_layernorm.scale",
+                target_path=f"{target_prefix}.post_attention_layernorm.weight",
                 sharding=(None,),
                 transpose=False,
             ),
             f"{prefix}.pre_feedforward_layernorm.weight": WeightMapping(
-                target_path=f"{target_prefix}.pre_feedforward_layernorm.scale",
+                target_path=f"{target_prefix}.pre_feedforward_layernorm.weight",
                 sharding=(None,),
                 transpose=False,
             ),
             f"{prefix}.post_feedforward_layernorm.weight": WeightMapping(
-                target_path=f"{target_prefix}.post_feedforward_layernorm.scale",
+                target_path=f"{target_prefix}.post_feedforward_layernorm.weight",
                 sharding=(None,),
                 transpose=False,
             ),
@@ -555,12 +538,12 @@ class Gemma4ForCausalLM(nnx.Module):
                 kv_head_padding=False,
             ),
             f"{prefix}.self_attn.q_norm.weight": WeightMapping(
-                target_path=f"{target_prefix}.self_attn.q_norm.scale",
+                target_path=f"{target_prefix}.self_attn.q_norm.weight",
                 sharding=(None,),
                 transpose=False,
             ),
             f"{prefix}.self_attn.k_norm.weight": WeightMapping(
-                target_path=f"{target_prefix}.self_attn.k_norm.scale",
+                target_path=f"{target_prefix}.self_attn.k_norm.weight",
                 sharding=(None,),
                 transpose=False,
             ),

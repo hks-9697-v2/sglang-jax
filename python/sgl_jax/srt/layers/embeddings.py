@@ -201,6 +201,7 @@ class RotaryEmbedding:
         is_neox_style: bool,
         dtype: jnp.dtype,
         mesh: jax.sharding.Mesh | None = None,
+        base_div_dim: int | None = None,
     ):
         self.head_size = head_size
         self.rotary_dim = rotary_dim
@@ -209,7 +210,8 @@ class RotaryEmbedding:
         self.is_neox_style = is_neox_style
         self.dtype = dtype
 
-        inv_freq_np = 1.0 / (base ** (np.arange(0, rotary_dim, 2, dtype=np.float32) / rotary_dim))
+        div_dim = base_div_dim if base_div_dim is not None else rotary_dim
+        inv_freq_np = 1.0 / (base ** (np.arange(0, rotary_dim, 2, dtype=np.float32) / div_dim))
         self._inv_freq_np = inv_freq_np  # shape: (rotary_dim // 2,)
 
     @named_scope
@@ -573,6 +575,7 @@ def get_rope(
     dtype: jnp.dtype | None = jnp.bfloat16,
     partial_rotary_factor: float = 1.0,
     dual_chunk_attention_config: dict[str, Any] | None = None,
+    base_div_dim: int | None = None,
 ) -> RotaryEmbedding:
     if rope_scaling is not None:
         # Transforms every value that is a list into a tuple for caching calls
@@ -604,13 +607,14 @@ def get_rope(
         rope_scaling_args,
         dual_chunk_attention_args,
         dtype,
+        base_div_dim,
     )
     if key in _ROPE_DICT:
         return _ROPE_DICT[key]
 
     if rope_scaling is None:
         rotary_emb = RotaryEmbedding(
-            head_size, rotary_dim, max_position, base, is_neox_style, dtype
+            head_size, rotary_dim, max_position, base, is_neox_style, dtype, base_div_dim=base_div_dim
         )
     else:
         if "rope_type" in rope_scaling:
