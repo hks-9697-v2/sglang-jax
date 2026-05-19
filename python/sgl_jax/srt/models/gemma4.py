@@ -302,7 +302,6 @@ class Gemma4DecoderLayer(nnx.Module):
         layer_callback_flag = []
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        jax.debug.print("[SGLANG LAYER {id}] input_layernorm - mean: {m}, std: {s}, min: {min_val}, max: {max_val}", id=self.layer_id, m=jnp.mean(hidden_states[:2]), s=jnp.std(hidden_states[:2]), min_val=jnp.min(hidden_states[:2]), max_val=jnp.max(hidden_states[:2]))
 
         layer_norm_callback_flag = precision_tracer.jit_pure_callback_record(
             hidden_states, "input_layernorm_output", "INPUT_LAYERNORM", self.layer_id
@@ -315,7 +314,6 @@ class Gemma4DecoderLayer(nnx.Module):
             forward_batch=forward_batch,
             token_to_kv_pool=token_to_kv_pool,
         )
-        jax.debug.print("[SGLANG LAYER {id}] self_attn - mean: {m}, std: {s}, min: {min_val}, max: {max_val}", id=self.layer_id, m=jnp.mean(hidden_states[:2]), s=jnp.std(hidden_states[:2]), min_val=jnp.min(hidden_states[:2]), max_val=jnp.max(hidden_states[:2]))
 
         attn_callback_flag = precision_tracer.jit_pure_callback_record(
             hidden_states, "self_attn_output", "SELF_ATTN", self.layer_id
@@ -332,7 +330,6 @@ class Gemma4DecoderLayer(nnx.Module):
         outputs = residual + mlp_output
 
         outputs = outputs * self.layer_scalar.value
-        jax.debug.print("[SGLANG LAYER {id}] output - mean: {m}, std: {s}, min: {min_val}, max: {max_val}", id=self.layer_id, m=jnp.mean(outputs[:2]), s=jnp.std(outputs[:2]), min_val=jnp.min(outputs[:2]), max_val=jnp.max(outputs[:2]))
 
         mlp_callback_flag = precision_tracer.jit_pure_callback_record(
             outputs, "mlp_output", "MLP", self.layer_id
@@ -382,7 +379,6 @@ class Gemma4Model(nnx.Module):
         forward_batch: ForwardBatch,
         token_to_kv_pool: KVCache,
     ):
-        jax.debug.print("[SGLANG INPUT IDS] {}", forward_batch.input_ids)
         hidden_states = self.embed_tokens(forward_batch.input_ids)
         hidden_states *= jnp.array([self.hidden_size**0.5], dtype=hidden_states.dtype)
 
@@ -449,9 +445,6 @@ class Gemma4ForCausalLM(nnx.Module):
 
         loader.load_weights_from_safetensors(weight_mappings)
 
-        for layer in self.model.layers:
-            layer.layer_scalar.value = jax.device_put(jnp.ones((1,), dtype=self.dtype), jax.sharding.NamedSharding(self.mesh, P()))
-
         if hasattr(self, "lm_head"):
             if isinstance(self.lm_head.embedding.value, jax.ShapeDtypeStruct):
                 logger.info("Tying lm_head weights to embed_tokens (lm_head not in safetensors)")
@@ -499,6 +492,11 @@ class Gemma4ForCausalLM(nnx.Module):
         use_k_eq_v = ((not is_sliding) and getattr(self.config, "attention_k_eq_v", False))
 
         mappings = {
+            f"{prefix}.layer_scalar": WeightMapping(
+                target_path=f"{target_prefix}.layer_scalar",
+                sharding=(None,),
+                transpose=False,
+            ),
             f"{prefix}.input_layernorm.weight": WeightMapping(
                 target_path=f"{target_prefix}.input_layernorm.weight",
                 sharding=(None,),
