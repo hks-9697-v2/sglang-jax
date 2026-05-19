@@ -136,7 +136,7 @@ class Gemma4Attention(nnx.Module):
             scope_name="q_proj",
         )
         self.q_norm = GemmaRMSNorm(
-            self.head_dim, epsilon=rms_norm_eps
+            self.head_dim, epsilon=rms_norm_eps, add_unit_offset=False
         )
 
         self.k_proj = LinearBase(
@@ -149,7 +149,7 @@ class Gemma4Attention(nnx.Module):
             scope_name="k_proj",
         )
         self.k_norm = GemmaRMSNorm(
-            self.head_dim, epsilon=rms_norm_eps
+            self.head_dim, epsilon=rms_norm_eps, add_unit_offset=False
         )
 
         if self.use_k_eq_v:
@@ -263,6 +263,7 @@ class Gemma4DecoderLayer(nnx.Module):
         self.input_layernorm = GemmaRMSNorm(
             config.hidden_size,
             epsilon=rms_norm_eps,
+            add_unit_offset=False,
         )
         self.self_attn = Gemma4Attention(
             config=config,
@@ -275,10 +276,12 @@ class Gemma4DecoderLayer(nnx.Module):
         self.post_attention_layernorm = GemmaRMSNorm(
             config.hidden_size,
             epsilon=rms_norm_eps,
+            add_unit_offset=False,
         )
         self.pre_feedforward_layernorm = GemmaRMSNorm(
             config.hidden_size,
             epsilon=rms_norm_eps,
+            add_unit_offset=False,
         )
         self.mlp = Gemma4MLP(
             hidden_size=config.hidden_size,
@@ -290,6 +293,7 @@ class Gemma4DecoderLayer(nnx.Module):
         self.post_feedforward_layernorm = GemmaRMSNorm(
             config.hidden_size,
             epsilon=rms_norm_eps,
+            add_unit_offset=False,
         )
 
     def __call__(
@@ -370,6 +374,7 @@ class Gemma4Model(nnx.Module):
         self.norm = GemmaRMSNorm(
             config.hidden_size,
             epsilon=getattr(config, "rms_norm_eps", 1e-6),
+            add_unit_offset=False,
         )
         self.hidden_size = config.hidden_size
         self.layers_to_capture = []
