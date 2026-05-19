@@ -458,7 +458,7 @@ class GenerateReqInput:
         elif self.input_ids is not None:
             if len(self.input_ids) == 0:
                 raise ValueError("input_ids cannot be empty.")
-            if isinstance(self.input_ids[0], int):
+            if not isinstance(self.input_ids[0], (list, tuple)):
                 self.is_single = True
                 self.batch_size = 1
             else:
