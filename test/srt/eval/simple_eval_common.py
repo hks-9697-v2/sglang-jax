@@ -140,6 +140,7 @@ class ChatCompletionSampler(SamplerBase):
                     messages=message_list,
                     temperature=self.temperature,
                     max_tokens=self.max_tokens,
+                    extra_body={"chat_template_kwargs": {"enable_thinking": True}},
                 )
                 if self.top_p is not None:
                     kwargs["top_p"] = self.top_p
