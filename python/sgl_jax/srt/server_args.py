@@ -199,9 +199,10 @@ class ServerArgs:
         # update device
         if self.device:
             platform_env = os.environ.get("JAX_PLATFORMS", self.device)
-            assert (
-                self.device == platform_env
-            ), f"device {self.device} is not consistent with 'JAX_PLATFORMS' {platform_env}"
+            if platform_env != "cpu" and platform_env != "tpu,cpu":
+                assert (
+                    self.device == platform_env
+                ), f"device {self.device} is not consistent with 'JAX_PLATFORMS' {platform_env}"
         else:
             platform_env = os.environ.get("JAX_PLATFORMS", "")
             if platform_env != "":

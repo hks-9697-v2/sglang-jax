@@ -503,6 +503,12 @@ class ModelConfig:
     def needs_kv_head_replication(self, tensor_parallel_size: int) -> bool:
         """Returns True if KV heads need to be replicated across devices."""
         total_num_kv_heads = self.get_total_num_kv_heads()
+        if getattr(self.hf_text_config, "num_global_key_value_heads", None) is not None:
+            return tensor_parallel_size > getattr(self.hf_text_config, "num_global_key_value_heads", 1)
+        if hasattr(self, "_original_global_kv_heads"):
+            return tensor_parallel_size > self._original_global_kv_heads
+        if hasattr(self.hf_text_config, "layer_types") and tensor_parallel_size > 1:
+            return True
         return tensor_parallel_size > total_num_kv_heads
 
     def get_num_kv_head_replicas(self, tensor_parallel_size: int) -> int:
@@ -567,6 +573,15 @@ class ModelConfig:
                 swa_kv_heads_per_device * tensor_parallel_size
             )
 
+        if hasattr(self.hf_text_config, "num_global_key_value_heads") or hasattr(self.hf_text_config, "layer_types"):
+            orig_global = getattr(self.hf_text_config, "num_global_key_value_heads", 1)
+            if not hasattr(self, "_original_global_kv_heads"):
+                self._original_global_kv_heads = orig_global
+                self._original_local_kv_heads = self._original_hf_num_key_value_heads
+            from sgl_jax.srt.utils.jax_utils import get_num_kv_heads_by_tp
+            global_per_dev = get_num_kv_heads_by_tp(self._original_global_kv_heads, tensor_parallel_size)
+            self.hf_text_config.num_global_key_value_heads = global_per_dev * tensor_parallel_size
+
     def get_original_kv_head_id(self, tp_rank: int, tensor_parallel_size: int) -> int:
         """Determine which original KV head this device should use."""
         from sgl_jax.srt.utils.jax_utils import get_original_kv_head_id
@@ -580,6 +595,12 @@ class ModelConfig:
 
     def get_kv_padding_strategy(self) -> str:
         """Returns the padding strategy for KV heads."""
+        if getattr(self.hf_text_config, "num_global_key_value_heads", None) is not None:
+            return "replicate"
+        if hasattr(self.hf_text_config, "layer_types"):
+            return "replicate"
+        if hasattr(self, "_original_global_kv_heads"):
+            return "replicate"
         if self.is_gqa_model():
             # GQA models should replicate existing kv heads to maintain attention semantics
             return "replicate"
