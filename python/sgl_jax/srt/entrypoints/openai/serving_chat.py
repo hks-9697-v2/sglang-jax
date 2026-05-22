@@ -78,11 +78,7 @@ class OpenAIServingChat(OpenAIServingBase):
         if is_multimodal:
             prompt_kwargs = {"text": processed_messages.prompt}
         else:
-            # Handle single vs multiple requests
-            if isinstance(processed_messages.prompt_ids, str):
-                prompt_kwargs = {"text": processed_messages.prompt_ids}
-            else:
-                prompt_kwargs = {"input_ids": processed_messages.prompt_ids}
+            prompt_kwargs = {"text": processed_messages.prompt}
 
         adapted_request = GenerateReqInput(
             **prompt_kwargs,
@@ -205,12 +201,12 @@ class OpenAIServingChat(OpenAIServingBase):
                 and "chat_template" not in chat_template_kwargs
                 and self.tokenizer_manager.mm_processor is None
             ):
-                # Use a simple default chat template
-                default_template = """{% for message in messages %}{% if message['role'] == 'system' %}{{ message['content'] }}{% elif message['role'] == 'user' %}User: {{ message['content'] }}{% elif message['role'] == 'assistant' %}Assistant: {{ message['content'] }}{% endif %}{% if not loop.last %}
-
-{% endif %}{% endfor %}{% if add_generation_prompt %}
-Assistant: {% endif %}"""
-                chat_template_kwargs["chat_template"] = default_template
+                if "gemma" in str(self.tokenizer_manager.server_args.model_path).lower():
+                    gemma_template = """<bos>{% for message in messages %}{% if message['role'] == 'system' %}<|turn>system\n{{ message['content'] }}<turn|>\n{% elif message['role'] == 'user' %}<|turn>user\n{{ message['content'] }}<turn|>\n{% elif message['role'] == 'assistant' %}<|turn>model\n{{ message['content'] }}<turn|>\n{% endif %}{% endfor %}{% if add_generation_prompt %}<|turn>model\n{% if enable_thinking %}<|channel>thought\n{% endif %}{% endif %}"""
+                    chat_template_kwargs["chat_template"] = gemma_template
+                else:
+                    default_template = """{% for message in messages %}{% if message['role'] == 'system' %}{{ message['content'] }}{% elif message['role'] == 'user' %}User: {{ message['content'] }}{% elif message['role'] == 'assistant' %}Assistant: {{ message['content'] }}{% endif %}{% if not loop.last %}\n\n{% endif %}{% endfor %}{% if add_generation_prompt %}\nAssistant: {% endif %}"""
+                    chat_template_kwargs["chat_template"] = default_template
             if self.tokenizer_manager.mm_processor is not None:
                 prompt = self.tokenizer_manager.mm_processor.apply_chat_template(
                     openai_compatible_messages,
@@ -219,27 +215,56 @@ Assistant: {% endif %}"""
                     tools=tools,
                     **chat_template_kwargs,
                 )
+                if "<|turn>model\n<|channel>thought\n<channel|>" in prompt:
+                    if chat_template_kwargs.get("enable_thinking", False):
+                        prompt = prompt.replace("<|turn>model\n<|channel>thought\n<channel|>", "<|turn>model\n<|channel>thought\n")
+                    else:
+                        prompt = prompt.replace("<|turn>model\n<|channel>thought\n<channel|>", "<|turn>model\n")
+                if chat_template_kwargs.get("enable_thinking", False) and prompt.endswith("<|turn>model\n"):
+                    prompt = prompt + "<|channel>thought\n"
+                if "<|think|\n>" in prompt:
+                    prompt = prompt.replace("<|think|\n>", "")
                 prompt_ids = self.tokenizer_manager.tokenizer.encode(prompt)
             else:
-                prompt_ids = self.tokenizer_manager.tokenizer.apply_chat_template(
+                prompt = self.tokenizer_manager.tokenizer.apply_chat_template(
                     openai_compatible_messages,
-                    tokenize=True,
+                    tokenize=False,
                     add_generation_prompt=True,
                     tools=tools,
                     **chat_template_kwargs,
                 )
+                if "<|turn>model\n<|channel>thought\n<channel|>" in prompt:
+                    if chat_template_kwargs.get("enable_thinking", False):
+                        prompt = prompt.replace("<|turn>model\n<|channel>thought\n<channel|>", "<|turn>model\n<|channel>thought\n")
+                    else:
+                        prompt = prompt.replace("<|turn>model\n<|channel>thought\n<channel|>", "<|turn>model\n")
+                if chat_template_kwargs.get("enable_thinking", False) and prompt.endswith("<|turn>model\n"):
+                    prompt = prompt + "<|channel>thought\n"
+                if "<|think|\n>" in prompt:
+                    prompt = prompt.replace("<|think|\n>", "")
+                prompt_ids = self.tokenizer_manager.tokenizer.encode(prompt)
         except Exception:
             #  This except branch will be triggered when the chosen model
             #  has a different tools input format that is not compatible
             #  with openAI's apply_chat_template tool_call format, like Mistral.
             tools = [t if "function" in t else {"function": t} for t in tools] if tools else None
-            prompt_ids = self.tokenizer_manager.tokenizer.apply_chat_template(
+            prompt = self.tokenizer_manager.tokenizer.apply_chat_template(
                 openai_compatible_messages,
-                tokenize=True,
+                tokenize=False,
                 add_generation_prompt=True,
                 tools=tools,
                 **chat_template_kwargs,
             )
+            if "<|turn>model\n<|channel>thought\n<channel|>" in prompt:
+                if chat_template_kwargs.get("enable_thinking", False):
+                    prompt = prompt.replace("<|turn>model\n<|channel>thought\n<channel|>", "<|turn>model\n<|channel>thought\n")
+                else:
+                    prompt = prompt.replace("<|turn>model\n<|channel>thought\n<channel|>", "<|turn>model\n")
+            if chat_template_kwargs.get("enable_thinking", False) and prompt.endswith("<|turn>model\n"):
+                prompt = prompt + "<|channel>thought\n"
+            if "<|think|\n>" in prompt:
+                prompt = prompt.replace("<|think|\n>", "")
+            prompt_ids = self.tokenizer_manager.tokenizer.encode(prompt)
 
         if assistant_prefix:
             encoded = self.tokenizer_manager.tokenizer.encode(assistant_prefix)
