@@ -616,7 +616,6 @@ def _launch_subprocesses(
     detoken_proc.start()
 
     # Launch tokenizer process
-    os.environ["JAX_PLATFORMS"] = "cpu"
     tokenizer_manager = TokenizerManager(server_args, port_args)
 
     # Initialize templates

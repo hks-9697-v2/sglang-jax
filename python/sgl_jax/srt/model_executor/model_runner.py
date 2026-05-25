@@ -387,17 +387,9 @@ class ModelRunner(ModelRunnerKVCacheMixin, BaseModelRunner):
         if not self.is_hybrid:
             return self.model_config.num_hidden_layers
 
-        cfg = self.model_config.hf_text_config
-        if getattr(cfg, "global_head_dim", None) is not None:
-            layer_types = getattr(cfg, "layer_types", ["full_attention"] * self.model_config.num_hidden_layers)
-            swa_layers = sum(1 for lt in layer_types if lt == "sliding_attention")
-            full_layers = len(layer_types) - swa_layers
-            num_full_heads = getattr(cfg, "num_global_key_value_heads", getattr(cfg, "num_key_value_heads", 1))
-            num_swa_heads = getattr(cfg, "num_key_value_heads", 1)
-            from sgl_jax.srt.utils.jax_utils import get_num_kv_heads_by_tp
-            full_heads_per_device = get_num_kv_heads_by_tp(num_full_heads, self.attention_tp_size)
-            swa_heads_per_device = get_num_kv_heads_by_tp(num_swa_heads, self.attention_tp_size)
-            ratio = (swa_heads_per_device * cfg.head_dim) / float(full_heads_per_device * cfg.global_head_dim)
+        if self.model_config.has_global_head_dim:
+            full_heads_per_device, swa_heads_per_device, swa_layers, full_layers = self.model_config.get_local_global_head_counts(self.attention_tp_size)
+            ratio = (swa_heads_per_device * self.model_config.head_dim) / float(full_heads_per_device * self.model_config.global_head_dim)
             return ratio * swa_layers + full_layers
 
         swa_num_kv_heads = getattr(self.model_config.hf_config, "swa_num_key_value_heads", None)
@@ -628,14 +620,9 @@ class ModelRunner(ModelRunnerKVCacheMixin, BaseModelRunner):
         swa_layers_num = len(swa_attention_layer_ids)
         swa_full_tokens_ratio = self.server_args.swa_full_tokens_ratio
 
-        cfg = self.model_config.hf_text_config
-        if getattr(cfg, "global_head_dim", None) is not None:
-            num_full_heads = getattr(cfg, "num_global_key_value_heads", getattr(cfg, "num_key_value_heads", 1))
-            num_swa_heads = getattr(cfg, "num_key_value_heads", 1)
-            from sgl_jax.srt.utils.jax_utils import get_num_kv_heads_by_tp
-            full_heads_per_device = get_num_kv_heads_by_tp(num_full_heads, self.attention_tp_size)
-            swa_heads_per_device = get_num_kv_heads_by_tp(num_swa_heads, self.attention_tp_size)
-            ratio = (swa_heads_per_device * cfg.head_dim) / float(full_heads_per_device * cfg.global_head_dim)
+        if self.model_config.has_global_head_dim:
+            full_heads_per_device, swa_heads_per_device, _, _ = self.model_config.get_local_global_head_counts(self.attention_tp_size)
+            ratio = (swa_heads_per_device * self.model_config.head_dim) / float(full_heads_per_device * self.model_config.global_head_dim)
         else:
             swa_num_kv_heads = getattr(self.model_config.hf_config, "swa_num_key_value_heads", None)
             if swa_num_kv_heads is not None:

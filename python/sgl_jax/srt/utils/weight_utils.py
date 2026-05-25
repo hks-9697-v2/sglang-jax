@@ -2801,33 +2801,29 @@ class WeightLoader:
             if dim1 == total_kv_heads * self.head_dim:
                 target_axis = 1
                 step_size = self.head_dim
-            else:
-                cfg = getattr(self.model_config, "hf_text_config", self.model_config.hf_config)
-                if getattr(cfg, "global_head_dim", None) is not None:
-                    orig_local_heads = getattr(self.model_config, "_original_local_kv_heads", getattr(self.model_config, "_original_hf_num_key_value_heads", 4))
-                    orig_global_heads = getattr(self.model_config, "_original_global_kv_heads", orig_local_heads)
-                    if dim1 == cfg.global_head_dim:
-                        if self.sharding_size > 1:
-                            total_kv_heads = 1
-                            num_replicas = self.sharding_size
-                            target_axis = 1
-                            step_size = cfg.global_head_dim
-                            logger.info("MQA Global KV replication: matching dim1=%d to 1 head, replicating %d times", dim1, num_replicas)
-                    elif dim1 == orig_global_heads * cfg.global_head_dim:
-                        target_heads = getattr(cfg, "num_global_key_value_heads", getattr(cfg, "num_key_value_heads", orig_global_heads))
-                        if target_heads > orig_global_heads:
-                            total_kv_heads = orig_global_heads
-                            num_replicas = target_heads // orig_global_heads
-                            target_axis = 1
-                            step_size = cfg.global_head_dim
-                            logger.info("GQA Global KV replication: matching dim1=%d to %d heads, replicating %d times to %d heads", dim1, total_kv_heads, num_replicas, target_heads)
-                    elif dim1 == orig_local_heads * cfg.head_dim:
-                        if self.sharding_size > orig_local_heads:
-                            total_kv_heads = orig_local_heads
-                            num_replicas = self.sharding_size // orig_local_heads
-                            target_axis = 1
-                            step_size = cfg.head_dim
-                            logger.info("GQA Local KV replication: matching dim1=%d to %d heads, replicating %d times", dim1, total_kv_heads, num_replicas)
+            elif self.model_config.has_global_head_dim:
+                g_dim, l_dim, orig_l_heads, orig_g_heads, target_heads = self.model_config.get_local_global_weight_params()
+                if dim1 == g_dim:
+                    if self.sharding_size > 1:
+                        total_kv_heads = 1
+                        num_replicas = self.sharding_size
+                        target_axis = 1
+                        step_size = g_dim
+                        logger.info("MQA Global KV replication: matching dim1=%d to 1 head, replicating %d times", dim1, num_replicas)
+                elif dim1 == orig_g_heads * g_dim:
+                    if target_heads > orig_g_heads:
+                        total_kv_heads = orig_g_heads
+                        num_replicas = target_heads // orig_g_heads
+                        target_axis = 1
+                        step_size = g_dim
+                        logger.info("GQA Global KV replication: matching dim1=%d to %d heads, replicating %d times to %d heads", dim1, total_kv_heads, num_replicas, target_heads)
+                elif dim1 == orig_l_heads * l_dim:
+                    if self.sharding_size > orig_l_heads:
+                        total_kv_heads = orig_l_heads
+                        num_replicas = self.sharding_size // orig_l_heads
+                        target_axis = 1
+                        step_size = l_dim
+                        logger.info("GQA Local KV replication: matching dim1=%d to %d heads, replicating %d times", dim1, total_kv_heads, num_replicas)
 
         if target_axis == -1:
             return weight
