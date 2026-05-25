@@ -210,18 +210,10 @@ class ModelRunnerKVCacheMixin:
             per_token = kv_dim * aligned_ps * dtype_size // self.page_size
             return per_token * num_layers
 
-        cfg = getattr(self.model_config, "hf_text_config", self.model_config.hf_config)
-        if getattr(cfg, "global_head_dim", None) is not None:
-            layer_types = getattr(cfg, "layer_types", ["full_attention"] * self.model_config.num_hidden_layers)
-            swa_layers = sum(1 for lt in layer_types if lt == "sliding_attention")
-            full_layers = len(layer_types) - swa_layers
-            num_full_heads = getattr(cfg, "num_global_key_value_heads", getattr(cfg, "num_key_value_heads", 1))
-            num_swa_heads = getattr(cfg, "num_key_value_heads", 1)
-            from sgl_jax.srt.utils.jax_utils import get_num_kv_heads_by_tp
-            full_heads_per_device = get_num_kv_heads_by_tp(num_full_heads, self.attention_tp_size)
-            swa_heads_per_device = get_num_kv_heads_by_tp(num_swa_heads, self.attention_tp_size)
-            full_cost = full_heads_per_device * align128(cfg.global_head_dim) * 2 * full_layers * dtype_size
-            swa_cost = swa_heads_per_device * align128(cfg.head_dim) * 2 * swa_layers * dtype_size
+        if self.model_config.has_global_head_dim:
+            full_heads_per_device, swa_heads_per_device, swa_layers, full_layers = self.model_config.get_local_global_head_counts(self.attention_tp_size)
+            full_cost = full_heads_per_device * align128(self.model_config.global_head_dim) * 2 * full_layers * dtype_size
+            swa_cost = swa_heads_per_device * align128(self.model_config.head_dim) * 2 * swa_layers * dtype_size
             return int(full_cost + swa_cost)
 
         return (
@@ -462,16 +454,15 @@ class ModelRunnerKVCacheMixin:
             else:
                 swa_head_num = None
 
-            cfg = getattr(self.model_config, "hf_text_config", self.model_config.hf_config)
             full_head_dim = self.model_config.head_dim
             full_head_num = self.model_config.get_total_num_kv_heads_with_replication(self.attention_tp_size)
             swa_head_dim = None
-            if getattr(cfg, "global_head_dim", None) is not None:
-                full_head_dim = cfg.global_head_dim
-                full_head_num = getattr(cfg, "num_global_key_value_heads", getattr(cfg, "num_key_value_heads", 1))
-                swa_head_dim = (cfg.head_dim + 127) // 128 * 128
-                if getattr(cfg, "num_global_key_value_heads", None) is not None:
-                    swa_head_num = getattr(cfg, "num_key_value_heads", 1)
+            if self.model_config.has_global_head_dim:
+                full_head_dim = self.model_config.global_head_dim
+                _, _, _, _, target_heads = self.model_config.get_local_global_weight_params()
+                full_head_num = target_heads
+                swa_head_dim = (self.model_config.head_dim + 127) // 128 * 128
+                swa_head_num = getattr(self.model_config.hf_text_config, "num_key_value_heads", 1)
 
             self.token_to_kv_pool = SWAKVPool(
                 size=self.full_max_total_num_tokens,

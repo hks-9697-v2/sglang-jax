@@ -2039,7 +2039,6 @@ def run_scheduler_process(
     dp_rank: int | None,
     pipe_writer,
 ):
-    os.environ["JAX_PLATFORMS"] = "tpu,cpu"
     # Generate the prefix
     prefix = ""
     if server_args.nnodes > 1:
