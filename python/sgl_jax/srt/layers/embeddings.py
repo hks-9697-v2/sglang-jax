@@ -624,11 +624,11 @@ def get_rope(
         else:
             raise ValueError("Unknown RoPE scaling type")
 
-        if scaling_type in ("default", "proportional"):
+        if scaling_type == "default":
             # HF transformers uses rope_type="default" to mean "no scaling",
             # equivalent to rope_scaling=None.  Fall back to plain RotaryEmbedding.
             rotary_emb = RotaryEmbedding(
-                head_size, rotary_dim, max_position, base, is_neox_style, dtype, base_div_dim=base_div_dim
+                head_size, rotary_dim, max_position, base, is_neox_style, dtype
             )
         elif scaling_type == "llama3":
             scaling_factor = rope_scaling["factor"]
