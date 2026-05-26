@@ -502,13 +502,11 @@ class ModelConfig:
 
     def needs_kv_head_replication(self, tensor_parallel_size: int) -> bool:
         """Returns True if KV heads need to be replicated across devices."""
-        total_num_kv_heads = self.get_total_num_kv_heads()
-        if getattr(self.hf_text_config, "num_global_key_value_heads", None) is not None:
-            return tensor_parallel_size > getattr(self.hf_text_config, "num_global_key_value_heads", 1)
         if hasattr(self, "_original_global_kv_heads"):
             return tensor_parallel_size > self._original_global_kv_heads
-        if hasattr(self.hf_text_config, "layer_types") and tensor_parallel_size > 1:
-            return True
+        if getattr(self.hf_text_config, "num_global_key_value_heads", None) is not None:
+            return tensor_parallel_size > getattr(self.hf_text_config, "num_global_key_value_heads", 1)
+        total_num_kv_heads = self.get_total_num_kv_heads()
         return tensor_parallel_size > total_num_kv_heads
 
     def get_num_kv_head_replicas(self, tensor_parallel_size: int) -> int:
@@ -641,8 +639,6 @@ class ModelConfig:
     def get_kv_padding_strategy(self) -> str:
         """Returns the padding strategy for KV heads."""
         if getattr(self.hf_text_config, "num_global_key_value_heads", None) is not None:
-            return "replicate"
-        if hasattr(self.hf_text_config, "layer_types"):
             return "replicate"
         if hasattr(self, "_original_global_kv_heads"):
             return "replicate"
