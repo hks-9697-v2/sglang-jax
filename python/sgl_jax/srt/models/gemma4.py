@@ -344,6 +344,11 @@ class Gemma4DecoderLayer(nnx.Module):
 
 
 class Gemma4Model(nnx.Module):
+    """Gemma 4 core model structure architecture.
+
+    Supports dynamic selection between full global attention and local sliding window attention layers.
+    """
+
     def __init__(
         self,
         config: PretrainedConfig,
@@ -412,6 +417,8 @@ class Gemma4Model(nnx.Module):
 
 
 class Gemma4ForCausalLM(nnx.Module):
+    """Gemma 4 Causal LM wrapper supporting sharded weights loading and logits evaluation."""
+
     def __init__(
         self,
         config: PretrainedConfig,
