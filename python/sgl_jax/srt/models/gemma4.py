@@ -28,6 +28,7 @@ init_fn = nnx.initializers.uniform()
 class Gemma4MLP(nnx.Module):
     def __init__(
         self,
+        config: PretrainedConfig,
         hidden_size: int,
         intermediate_size: int,
         mesh: jax.sharding.Mesh,
@@ -66,7 +67,15 @@ class Gemma4MLP(nnx.Module):
             scope_name="down_proj",
         )
 
-        self.act_fn = jax.nn.gelu
+        act_str = getattr(config, "hidden_activation", "gelu_pytorch_tanh")
+        if act_str == "gelu_pytorch_tanh":
+            self.act_fn = lambda x: jax.nn.gelu(x, approximate=True)
+        elif act_str == "gelu":
+            self.act_fn = jax.nn.gelu
+        elif act_str == "silu":
+            self.act_fn = jax.nn.silu
+        else:
+            self.act_fn = jax.nn.gelu
 
     @named_scope
     def __call__(self, hidden_states: jax.Array) -> jax.Array:
@@ -184,7 +193,7 @@ class Gemma4Attention(nnx.Module):
             max_position=max_position_embeddings,
             base=rope_theta,
             is_neox_style=True,
-            rope_scaling=None,
+            rope_scaling=rope_scaling,
             dtype=dtype,
             partial_rotary_factor=rope_proportion,
             base_div_dim=self.head_dim,
@@ -254,7 +263,7 @@ class Gemma4DecoderLayer(nnx.Module):
     ):
         self.layer_id = layer_id
         self.hidden_size = config.hidden_size
-        max_position_embeddings = getattr(config, "max_position_embeddings", 256000)
+        max_position_embeddings = getattr(config, "max_position_embeddings", 262144)
         attention_bias = getattr(config, "attention_bias", False)
         rms_norm_eps = getattr(config, "rms_norm_eps", 1e-6)
 
@@ -284,6 +293,7 @@ class Gemma4DecoderLayer(nnx.Module):
             add_unit_offset=False,
         )
         self.mlp = Gemma4MLP(
+            config=config,
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
             layer_id=layer_id,
