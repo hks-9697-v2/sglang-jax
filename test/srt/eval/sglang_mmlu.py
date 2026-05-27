@@ -67,7 +67,11 @@ class SglangMMLUEval(Eval):
                     temperature=0,
                     max_tokens=1,
                 )
-                response_text = response.choices[0].text
+                from eval.simple_eval_common import ResponseString
+                response_text = ResponseString(response.choices[0].text or "")
+                response_text.finish_reason = str(response.choices[0].finish_reason)
+                if getattr(response, "usage", None):
+                    response_text.non_reasoning_tokens = getattr(response.usage, "completion_tokens", 1) or 1
             except Exception as e:
                 # Fallback to chat completions if raw fails
                 prompt_messages = [{"role": "user", "content": prompt}]
@@ -84,14 +88,20 @@ class SglangMMLUEval(Eval):
 
             category = subject2category.get(subject, "other")
 
+            thinking_tokens = getattr(response_text, "reasoning_tokens", 0)
+            non_thinking_tokens = getattr(response_text, "non_reasoning_tokens", 0)
+            finish_reason = getattr(response_text, "finish_reason", "stop")
+            has_response = bool(str(response_text).strip())
+
             return SingleEvalResult(
-                html=f"<p>Prompt: {prompt}</p><p>Response: {response_text}</p><p>Extracted: {extracted_answer}</p><p>Correct Answer: {row['Answer']}</p>",
+                html=f"<p>Prompt: {prompt}</p><p>Response: {response_text}</p><p>Extracted: {extracted_answer}</p><p>Correct Answer: {row['Answer']}</p><p>Thinking Tokens: {thinking_tokens}</p><p>Non-thinking Tokens: {non_thinking_tokens}</p><p>Finish Reason: {finish_reason}</p>",
                 score=score,
                 metrics={category: score},
                 convo=[
                     {"role": "user", "content": prompt},
                     {"role": "assistant", "content": response_text},
                 ],
+                has_response=has_response,
             )
 
         results = common.map_with_progress(fn, self.test_examples, self.num_threads)

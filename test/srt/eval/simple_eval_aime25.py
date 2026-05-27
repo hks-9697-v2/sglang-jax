@@ -94,12 +94,20 @@ class AIME25Eval(Eval):
             extracted_answer = parse_answer(response_text)
             score = score_aime(correct_answer, extracted_answer)
 
+            thinking_tokens = getattr(response_text, "reasoning_tokens", 0)
+            non_thinking_tokens = getattr(response_text, "non_reasoning_tokens", 0)
+            finish_reason = getattr(response_text, "finish_reason", "stop")
+            has_response = bool(str(response_text).strip())
+
             html = common.jinja_env.from_string(HTML_JINJA).render(
                 prompt_messages=prompt_messages,
                 next_message=dict(content=response_text, role="assistant"),
                 score=score,
                 correct_answer=correct_answer,
                 extracted_answer=extracted_answer,
+                thinking_tokens=thinking_tokens,
+                non_thinking_tokens=non_thinking_tokens,
+                finish_reason=finish_reason,
             )
             convo = prompt_messages + [dict(content=response_text, role="assistant")]
 
@@ -108,6 +116,7 @@ class AIME25Eval(Eval):
                 score=score,
                 convo=convo,
                 metrics={"aime25": score},
+                has_response=has_response,
             )
 
         results = common.map_with_progress(fn, self.examples, num_threads=self._num_threads)
