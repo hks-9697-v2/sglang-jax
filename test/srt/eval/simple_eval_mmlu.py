@@ -100,16 +100,25 @@ class MMLUEval(Eval):
             match = re.search(ANSWER_PATTERN_MULTICHOICE, response_text)
             extracted_answer = match.group(1) if match else None
             score = 1.0 if extracted_answer == row["Answer"] else 0.0
+
+            thinking_tokens = getattr(response_text, "reasoning_tokens", 0)
+            non_thinking_tokens = getattr(response_text, "non_reasoning_tokens", 0)
+            finish_reason = getattr(response_text, "finish_reason", "stop")
+            has_response = bool(str(response_text).strip())
+
             html = common.jinja_env.from_string(HTML_JINJA).render(
                 prompt_messages=prompt_messages,
                 next_message=dict(content=response_text, role="assistant"),
                 score=score,
                 correct_answer=row["Answer"],
                 extracted_answer=extracted_answer,
+                thinking_tokens=thinking_tokens,
+                non_thinking_tokens=non_thinking_tokens,
+                finish_reason=finish_reason,
             )
             convo = prompt_messages + [dict(content=response_text, role="assistant")]
             category = subject2category.get(row["Subject"], "other")
-            return SingleEvalResult(html=html, score=score, metrics={category: score}, convo=convo)
+            return SingleEvalResult(html=html, score=score, metrics={category: score}, convo=convo, has_response=has_response)
 
         results = common.map_with_progress(fn, self.examples, self.num_threads)
         return common.aggregate_results(results)

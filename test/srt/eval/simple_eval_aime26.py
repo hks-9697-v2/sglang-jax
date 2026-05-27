@@ -36,7 +36,7 @@ def normalize_aime_answer(answer: str | None) -> str | None:
         num = int(float(answer))
         if 0 <= num <= 999:
             return str(num)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         pass
     return answer
 
@@ -124,12 +124,20 @@ class AIME26Eval(Eval):
                 else 0.0
             )
 
+            thinking_tokens = getattr(response_text, "reasoning_tokens", 0)
+            non_thinking_tokens = getattr(response_text, "non_reasoning_tokens", 0)
+            finish_reason = getattr(response_text, "finish_reason", "stop")
+            has_response = bool(str(response_text).strip())
+
             html = common.jinja_env.from_string(HTML_JINJA).render(
                 prompt_messages=prompt_messages,
                 next_message=dict(content=response_text, role="assistant"),
                 score=score,
                 correct_answer=row["answer"],
                 extracted_answer=extracted_answer,
+                thinking_tokens=thinking_tokens,
+                non_thinking_tokens=non_thinking_tokens,
+                finish_reason=finish_reason,
             )
             convo = prompt_messages + [dict(content=response_text, role="assistant")]
             return SingleEvalResult(
@@ -137,6 +145,7 @@ class AIME26Eval(Eval):
                 score=score,
                 convo=convo,
                 metrics={"aime26": score},
+                has_response=has_response,
             )
 
         results = common.map_with_progress(fn, self.examples, num_threads=self.num_threads)

@@ -47,6 +47,9 @@ class EvalResult:
     metrics: dict[str, float] | None  # other metrics
     htmls: list[str]  # strings of valid HTML
     convos: list[MessageList]  # sampled conversations
+    correct_count: int = 0
+    wrong_count: int = 0
+    no_response_count: int = 0
 
 
 @dataclass
@@ -59,6 +62,13 @@ class SingleEvalResult:
     metrics: dict[str, float] = field(default_factory=dict)
     html: str | None = None
     convo: MessageList | None = None  # sampled conversation
+    has_response: bool = True
+
+
+class ResponseString(str):
+    reasoning_tokens: int = 0
+    non_reasoning_tokens: int = 0
+    finish_reason: str = "stop"
 
 
 class Eval:
@@ -147,7 +157,25 @@ class ChatCompletionSampler(SamplerBase):
                 if self.extra_body:
                     kwargs["extra_body"] = self.extra_body
                 response = self.client.chat.completions.create(**kwargs)
-                return response.choices[0].message.content
+                txt = response.choices[0].message.content or ""
+                if hasattr(response.choices[0].message, "reasoning_content") and response.choices[0].message.reasoning_content:
+                    txt = f"{response.choices[0].message.reasoning_content}\n{txt}"
+                ret = ResponseString(txt)
+                ret.finish_reason = str(response.choices[0].finish_reason)
+                usage = getattr(response, "usage", None)
+                if usage:
+                    comp_tokens = getattr(usage, "completion_tokens", 0) or 0
+                    reas_tokens = 0
+                    comp_details = getattr(usage, "completion_tokens_details", None)
+                    if comp_details and hasattr(comp_details, "reasoning_tokens"):
+                        reas_tokens = getattr(comp_details, "reasoning_tokens", 0) or 0
+                    elif hasattr(response.choices[0].message, "reasoning_content") and response.choices[0].message.reasoning_content:
+                        reas_tokens = len(response.choices[0].message.reasoning_content.split())
+                    elif "thought" in txt or "<|channel>thought" in txt:
+                        reas_tokens = int(comp_tokens * 0.5)
+                    ret.reasoning_tokens = reas_tokens
+                    ret.non_reasoning_tokens = max(0, comp_tokens - reas_tokens)
+                return ret
             # NOTE: BadRequestError is triggered once for MMMU, please uncomment if you are rerunning MMMU
             except openai.BadRequestError as e:
                 print("Bad Request Error", e)
@@ -246,6 +274,12 @@ HTML_JINJA = """
 {% endfor %}
 <h3>Sampled message</h3>
 {{ message_to_html(next_message) | safe }}
+{% if thinking_tokens is defined %}
+<h3>Generation Metrics</h3>
+<p>Number thinking tokens: {{ thinking_tokens }}</p>
+<p>Non thinking output tokens: {{ non_thinking_tokens }}</p>
+<p>Generation completion reason: {{ finish_reason }}</p>
+{% endif %}
 <h3>Results</h3>
 <p>Correct Answer: {{ correct_answer }}</p>
 <p>Extracted Answer: {{ extracted_answer }}</p>
@@ -288,6 +322,9 @@ def aggregate_results(
     name2values = defaultdict(list)
     htmls = []
     convos = []
+    correct_count = 0
+    wrong_count = 0
+    no_response_count = 0
     for single_eval_result in single_eval_results:
         for name, value in single_eval_result.metrics.items():
             name2values[name].append(value)
@@ -295,6 +332,12 @@ def aggregate_results(
             name2values["score"].append(single_eval_result.score)
         htmls.append(single_eval_result.html)
         convos.append(single_eval_result.convo)
+        if not single_eval_result.has_response:
+            no_response_count += 1
+        elif single_eval_result.score is not None and single_eval_result.score >= 1.0:
+            correct_count += 1
+        else:
+            wrong_count += 1
     final_metrics = {}
     for name, values in name2values.items():
         stats = name2stats.get(name, default_stats)
@@ -306,6 +349,9 @@ def aggregate_results(
         metrics=final_metrics,
         htmls=htmls,
         convos=convos,
+        correct_count=correct_count,
+        wrong_count=wrong_count,
+        no_response_count=no_response_count,
     )
 
 
@@ -390,6 +436,16 @@ _report_template = """<!DOCTYPE html>
     </head>
     <body>
     {% if metrics %}
+    <h1>Summary Statistics</h1>
+    <table>
+    <tr>
+        <th>Status</th>
+        <th>Count</th>
+    </tr>
+    <tr><td><b>Correct Responses</b></td><td>{{ correct_count }}</td></tr>
+    <tr><td><b>Wrong Responses</b></td><td>{{ wrong_count }}</td></tr>
+    <tr><td><b>No Response (Blank)</b></td><td>{{ no_response_count }}</td></tr>
+    </table>
     <h1>Metrics</h1>
     <table>
     <tr>
@@ -426,6 +482,9 @@ def make_report(eval_result: EvalResult) -> str:
         score=eval_result.score,
         metrics=eval_result.metrics,
         htmls=eval_result.htmls,
+        correct_count=eval_result.correct_count,
+        wrong_count=eval_result.wrong_count,
+        no_response_count=eval_result.no_response_count,
     )
 
 
