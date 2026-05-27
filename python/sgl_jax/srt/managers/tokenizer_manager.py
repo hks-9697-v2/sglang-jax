@@ -174,6 +174,7 @@ class TokenizerManager:
                 trust_remote_code=server_args.trust_remote_code,
                 revision=server_args.revision,
                 sub_dir=tokenizer_subdir,
+                download_dir=server_args.download_dir,
             )
 
         # Store states
