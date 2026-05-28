@@ -3,6 +3,8 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
+import numpy as np
+import safetensors
 from flax import nnx
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
@@ -13,6 +15,7 @@ from sgl_jax.srt.layers.embeddings import Embed, ParallelLMHead, get_rope
 from sgl_jax.srt.layers.layernorm import GemmaRMSNorm, RMSNorm
 from sgl_jax.srt.layers.linear import LinearBase
 from sgl_jax.srt.layers.logits_processor import LogitsMetadata, LogitsProcessor
+from sgl_jax.srt.layers.moe import EPMoE, GateLogit, TopK
 from sgl_jax.srt.layers.radix_attention import RadixAttention
 from sgl_jax.srt.mem_cache.memory_pool import KVCache
 from sgl_jax.srt.model_executor.forward_batch_info import ForwardBatch
@@ -23,6 +26,34 @@ from sgl_jax.srt.utils.weight_utils import WeightLoader, WeightMapping
 logger = logging.getLogger(__name__)
 
 init_fn = nnx.initializers.uniform()
+
+
+class Gemma4Router(nnx.Module):
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        dtype: jnp.dtype = jnp.bfloat16,
+    ):
+        self.hidden_size = config.hidden_size
+        self.num_experts = getattr(config, "num_experts", 128)
+        rms_norm_eps = getattr(config, "rms_norm_eps", 1e-6)
+
+        self.norm = RMSNorm(self.hidden_size, epsilon=rms_norm_eps, param_dtype=dtype, use_scale=False, scope_name="norm")
+        self.scale = nnx.Param(jnp.ones((self.hidden_size,), dtype=dtype))
+        self.root_size = self.hidden_size ** -0.5
+        self.proj = GateLogit(
+            input_size=self.hidden_size,
+            num_experts=self.num_experts,
+            weight_dtype=dtype,
+        )
+        self.per_expert_scale = nnx.Param(jnp.ones((self.num_experts,), dtype=dtype))
+
+    def __call__(self, hidden_states: jax.Array) -> jax.Array:
+        x = self.norm(hidden_states)
+        x = x * self.root_size
+        x = x * self.scale.value.astype(x.dtype)
+        router_logits = self.proj(x)
+        return router_logits
 
 
 class Gemma4MLP(nnx.Module):
@@ -296,6 +327,56 @@ class Gemma4DecoderLayer(nnx.Module):
             add_unit_offset=False,
         )
 
+        self.enable_moe_block = getattr(config, "enable_moe_block", False)
+        if self.enable_moe_block:
+            num_experts = getattr(config, "num_experts", 128)
+            num_experts_per_tok = getattr(config, "num_experts_per_tok", getattr(config, "top_k_experts", 8))
+            moe_intermediate_size = getattr(config, "moe_intermediate_size", config.intermediate_size)
+
+            self.router = Gemma4Router(
+                config=config,
+                dtype=dtype,
+            )
+            self.topk = TopK(
+                topk=num_experts_per_tok,
+                renormalize=True,
+                layer_id=layer_id,
+            )
+            self.experts = EPMoE(
+                hidden_size=config.hidden_size,
+                num_experts=num_experts,
+                num_experts_per_tok=num_experts_per_tok,
+                intermediate_dim=moe_intermediate_size,
+                mesh=mesh,
+                ep_size=getattr(config, "ep_size", 1),
+                weight_dtype=dtype,
+                dtype=dtype,
+                layer_id=layer_id,
+                quantization_config=getattr(config, "quantization_config", None),
+            )
+            self.post_feedforward_layernorm_1 = GemmaRMSNorm(
+                config.hidden_size,
+                epsilon=rms_norm_eps,
+                add_unit_offset=False,
+            )
+            self.post_feedforward_layernorm_2 = GemmaRMSNorm(
+                config.hidden_size,
+                epsilon=rms_norm_eps,
+                add_unit_offset=False,
+            )
+            self.pre_feedforward_layernorm_2 = GemmaRMSNorm(
+                config.hidden_size,
+                epsilon=rms_norm_eps,
+                add_unit_offset=False,
+            )
+        else:
+            self.router = None
+            self.topk = None
+            self.experts = None
+            self.post_feedforward_layernorm_1 = None
+            self.post_feedforward_layernorm_2 = None
+            self.pre_feedforward_layernorm_2 = None
+
     def __call__(
         self,
         positions: jax.Array,
@@ -328,11 +409,29 @@ class Gemma4DecoderLayer(nnx.Module):
         hidden_states = residual + attn_output
         residual = hidden_states
 
-        mlp_input = self.pre_feedforward_layernorm(hidden_states)
-        mlp_output = self.mlp(mlp_input)
-        mlp_output = self.post_feedforward_layernorm(mlp_output)
-        outputs = residual + mlp_output
+        expert_ids = None
+        if self.enable_moe_block:
+            hidden_states_1 = self.pre_feedforward_layernorm(hidden_states)
+            hidden_states_1 = self.mlp(hidden_states_1)
+            hidden_states_1 = self.post_feedforward_layernorm_1(hidden_states_1)
 
+            router_logits = self.router(hidden_states)
+            topk_weights, topk_ids = self.topk(router_logits, dispatch_info=getattr(forward_batch, "expert_location_metadata", None))
+            expert_scales = jnp.take(self.router.per_expert_scale.value, topk_ids)
+            topk_weights = topk_weights * expert_scales
+
+            hidden_states_2 = self.pre_feedforward_layernorm_2(hidden_states)
+            hidden_states_2 = self.experts(hidden_states_2, topk_weights, topk_ids)
+            hidden_states_2 = self.post_feedforward_layernorm_2(hidden_states_2)
+
+            hidden_states = hidden_states_1 + hidden_states_2
+            expert_ids = jax.sharding.reshard(topk_ids, P(None))
+        else:
+            mlp_input = self.pre_feedforward_layernorm(hidden_states)
+            mlp_output = self.mlp(mlp_input)
+            hidden_states = self.post_feedforward_layernorm(mlp_output)
+
+        outputs = residual + hidden_states
         outputs = outputs * self.layer_scalar.value
 
         mlp_callback_flag = precision_tracer.jit_pure_callback_record(
@@ -340,7 +439,7 @@ class Gemma4DecoderLayer(nnx.Module):
         )
         layer_callback_flag.append(mlp_callback_flag)
 
-        return outputs, kv_fused, layer_callback_flag
+        return outputs, kv_fused, layer_callback_flag, expert_ids
 
 
 class Gemma4Model(nnx.Module):
@@ -394,11 +493,12 @@ class Gemma4Model(nnx.Module):
 
         layers_kv_fused = []
         layers_callback_flag = []
+        layers_topk_ids = []
         aux_hidden_states = []
         for layer_id, layer in enumerate(self.layers):
             if layer_id in self.layers_to_capture:
                 aux_hidden_states.append(hidden_states)
-            hidden_states, kv_fused, callback_flag = layer(
+            hidden_states, kv_fused, callback_flag, topk_ids = layer(
                 forward_batch.positions,
                 hidden_states,
                 forward_batch,
@@ -406,6 +506,7 @@ class Gemma4Model(nnx.Module):
             )
             layers_kv_fused.append(kv_fused)
             layers_callback_flag.extend(callback_flag)
+            layers_topk_ids.append(topk_ids)
 
         hidden_states = self.norm(hidden_states)
 
@@ -413,7 +514,7 @@ class Gemma4Model(nnx.Module):
             hidden_states, "transformer_output", "TRANSFORMER"
         )
         layers_callback_flag.append(callback_flag)
-        return hidden_states, aux_hidden_states, layers_kv_fused, layers_callback_flag
+        return hidden_states, aux_hidden_states, layers_kv_fused, layers_callback_flag, layers_topk_ids
 
 
 class Gemma4ForCausalLM(nnx.Module):
@@ -456,6 +557,36 @@ class Gemma4ForCausalLM(nnx.Module):
         weight_mappings = self._create_gemma4_weight_mappings()
 
         loader.load_weights_from_safetensors(weight_mappings)
+
+        if getattr(self.config, "enable_moe_block", False):
+            weight_info = loader._scan_weight_info()
+            for layer_idx, layer in enumerate(self.model.layers):
+                if layer.enable_moe_block and layer.experts is not None:
+                    key_gu = f"model.language_model.layers.{layer_idx}.experts.gate_up_proj.weight"
+                    if key_gu not in weight_info:
+                        key_gu = f"model.layers.{layer_idx}.experts.gate_up_proj.weight"
+                    if key_gu in weight_info:
+                        fn = weight_info[key_gu][0]["file"]
+                        with safetensors.safe_open(fn, framework="np", device="cpu") as f:
+                            tensor = f.get_tensor(key_gu)
+                            F = tensor.shape[1] // 2
+                            w0 = np.transpose(tensor[:, :F, :], (0, 2, 1))
+                            w1 = np.transpose(tensor[:, F:, :], (0, 2, 1))
+                            sharding_w0 = layer.experts.wi_0.sharding if hasattr(layer.experts.wi_0, 'sharding') else None
+                            layer.experts.wi_0.value = jax.device_put(w0.astype(jnp.float32), sharding_w0).astype(self.dtype) if sharding_w0 else jnp.array(w0, dtype=self.dtype)
+                            sharding_w1 = layer.experts.wi_1.sharding if hasattr(layer.experts.wi_1, 'sharding') else None
+                            layer.experts.wi_1.value = jax.device_put(w1.astype(jnp.float32), sharding_w1).astype(self.dtype) if sharding_w1 else jnp.array(w1, dtype=self.dtype)
+                    
+                    key_down = f"model.language_model.layers.{layer_idx}.experts.down_proj.weight"
+                    if key_down not in weight_info:
+                        key_down = f"model.layers.{layer_idx}.experts.down_proj.weight"
+                    if key_down in weight_info:
+                        fn = weight_info[key_down][0]["file"]
+                        with safetensors.safe_open(fn, framework="np", device="cpu") as f:
+                            tensor = f.get_tensor(key_down)
+                            wo = np.transpose(tensor, (0, 2, 1))
+                            sharding_wo = layer.experts.wo.sharding if hasattr(layer.experts.wo, 'sharding') else None
+                            layer.experts.wo.value = jax.device_put(wo.astype(jnp.float32), sharding_wo).astype(self.dtype) if sharding_wo else jnp.array(wo, dtype=self.dtype)
 
         if hasattr(self, "lm_head"):
             if isinstance(self.lm_head.embedding.value, jax.ShapeDtypeStruct):
@@ -582,6 +713,29 @@ class Gemma4ForCausalLM(nnx.Module):
                 kv_head_padding=True,
             )
 
+        if getattr(self.config, "enable_moe_block", False):
+            moe_norm_mappings = {
+                f"{prefix}.router.scale": WeightMapping(
+                    target_path=f"{target_prefix}.router.scale", sharding=(None,), transpose=False
+                ),
+                f"{prefix}.router.per_expert_scale": WeightMapping(
+                    target_path=f"{target_prefix}.router.per_expert_scale", sharding=(None,), transpose=False
+                ),
+                f"{prefix}.router.proj.weight": WeightMapping(
+                    target_path=f"{target_prefix}.router.proj.kernel", sharding=(None, None), transpose=True
+                ),
+                f"{prefix}.post_feedforward_layernorm_1.weight": WeightMapping(
+                    target_path=f"{target_prefix}.post_feedforward_layernorm_1.weight", sharding=(None,), transpose=False
+                ),
+                f"{prefix}.post_feedforward_layernorm_2.weight": WeightMapping(
+                    target_path=f"{target_prefix}.post_feedforward_layernorm_2.weight", sharding=(None,), transpose=False
+                ),
+                f"{prefix}.pre_feedforward_layernorm_2.weight": WeightMapping(
+                    target_path=f"{target_prefix}.pre_feedforward_layernorm_2.weight", sharding=(None,), transpose=False
+                ),
+            }
+            mappings.update(moe_norm_mappings)
+
         if getattr(self.config, "attention_bias", False):
             bias_mappings = {
                 f"{prefix}.self_attn.q_proj.bias": WeightMapping(
@@ -620,7 +774,7 @@ class Gemma4ForCausalLM(nnx.Module):
         logits_metadata: LogitsMetadata,
     ):
         kv_pool = memory_pools.token_to_kv_pool
-        hidden_states, aux_hidden_states, layers_kv_fused, layers_callback_flag = self.model(
+        hidden_states, aux_hidden_states, layers_kv_fused, layers_callback_flag, layers_topk_ids = self.model(
             forward_batch, kv_pool
         )
         if not getattr(self.config, "tie_word_embeddings", True):
@@ -635,7 +789,7 @@ class Gemma4ForCausalLM(nnx.Module):
                 aux_hidden_states=aux_hidden_states,
             )
 
-        return output, {"token_to_kv_pool": layers_kv_fused}, layers_callback_flag, None
+        return output, {"token_to_kv_pool": layers_kv_fused}, layers_callback_flag, layers_topk_ids
 
 
 class Gemma4ForConditionalGeneration(Gemma4ForCausalLM):
