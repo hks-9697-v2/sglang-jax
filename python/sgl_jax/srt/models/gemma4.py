@@ -285,6 +285,7 @@ class Gemma4DecoderLayer(nnx.Module):
     ):
         self.layer_id = layer_id
         self.hidden_size = config.hidden_size
+        self.mesh = mesh
         max_position_embeddings = getattr(config, "max_position_embeddings", 256000)
         attention_bias = getattr(config, "attention_bias", False)
         rms_norm_eps = getattr(config, "rms_norm_eps", 1e-6)
@@ -417,7 +418,7 @@ class Gemma4DecoderLayer(nnx.Module):
 
             router_logits = self.router(hidden_states)
             topk_weights, topk_ids = self.topk(router_logits, dispatch_info=getattr(forward_batch, "expert_location_metadata", None))
-            expert_scales = jnp.take(self.router.per_expert_scale.value, topk_ids)
+            expert_scales = self.router.per_expert_scale.value.at[topk_ids].get(out_sharding=NamedSharding(self.mesh, P("data")))
             topk_weights = topk_weights * expert_scales
 
             hidden_states_2 = self.pre_feedforward_layernorm_2(hidden_states)
