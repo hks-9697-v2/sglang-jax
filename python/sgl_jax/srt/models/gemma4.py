@@ -575,10 +575,9 @@ class Gemma4ForCausalLM(nnx.Module):
                             F = tensor.shape[1] // 2
                             w0 = np.transpose(tensor[:, :F, :], (0, 2, 1))
                             w1 = np.transpose(tensor[:, F:, :], (0, 2, 1))
-                            sharding_w0 = layer.experts.wi_0.sharding if hasattr(layer.experts.wi_0, 'sharding') else None
+                            sharding_w0 = jax.sharding.NamedSharding(layer.experts.moe_mesh, P("expert", None, "tensor")) if hasattr(layer.experts, 'moe_mesh') else None
                             layer.experts.wi_0.value = jax.device_put(w0.astype(jnp.float32), sharding_w0).astype(self.dtype) if sharding_w0 else jnp.array(w0, dtype=self.dtype)
-                            sharding_w1 = layer.experts.wi_1.sharding if hasattr(layer.experts.wi_1, 'sharding') else None
-                            layer.experts.wi_1.value = jax.device_put(w1.astype(jnp.float32), sharding_w1).astype(self.dtype) if sharding_w1 else jnp.array(w1, dtype=self.dtype)
+                            layer.experts.wi_1.value = jax.device_put(w1.astype(jnp.float32), sharding_w0).astype(self.dtype) if sharding_w0 else jnp.array(w1, dtype=self.dtype)
                     
                     key_down = f"model.language_model.layers.{layer_idx}.experts.down_proj"
                     if key_down not in weight_info:
@@ -590,7 +589,7 @@ class Gemma4ForCausalLM(nnx.Module):
                         with safetensors.safe_open(fn, framework="np", device="cpu") as f:
                             tensor = f.get_tensor(key_down)
                             wo = np.transpose(tensor, (0, 2, 1))
-                            sharding_wo = layer.experts.wo.sharding if hasattr(layer.experts.wo, 'sharding') else None
+                            sharding_wo = jax.sharding.NamedSharding(layer.experts.moe_mesh, P("expert", "tensor", None)) if hasattr(layer.experts, 'moe_mesh') else None
                             layer.experts.wo.value = jax.device_put(wo.astype(jnp.float32), sharding_wo).astype(self.dtype) if sharding_wo else jnp.array(wo, dtype=self.dtype)
 
         if hasattr(self, "lm_head"):
