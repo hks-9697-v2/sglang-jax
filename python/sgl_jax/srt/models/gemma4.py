@@ -563,9 +563,11 @@ class Gemma4ForCausalLM(nnx.Module):
             weight_info = loader._scan_weight_info()
             for layer_idx, layer in enumerate(self.model.layers):
                 if layer.enable_moe_block and layer.experts is not None:
-                    key_gu = f"model.language_model.layers.{layer_idx}.experts.gate_up_proj.weight"
+                    key_gu = f"model.language_model.layers.{layer_idx}.experts.gate_up_proj"
                     if key_gu not in weight_info:
-                        key_gu = f"model.layers.{layer_idx}.experts.gate_up_proj.weight"
+                        key_gu = f"model.language_model.layers.{layer_idx}.experts.gate_up_proj.weight"
+                    if key_gu not in weight_info:
+                        key_gu = f"model.layers.{layer_idx}.experts.gate_up_proj"
                     if key_gu in weight_info:
                         fn = weight_info[key_gu][0]["file"]
                         with safetensors.safe_open(fn, framework="np", device="cpu") as f:
@@ -578,9 +580,11 @@ class Gemma4ForCausalLM(nnx.Module):
                             sharding_w1 = layer.experts.wi_1.sharding if hasattr(layer.experts.wi_1, 'sharding') else None
                             layer.experts.wi_1.value = jax.device_put(w1.astype(jnp.float32), sharding_w1).astype(self.dtype) if sharding_w1 else jnp.array(w1, dtype=self.dtype)
                     
-                    key_down = f"model.language_model.layers.{layer_idx}.experts.down_proj.weight"
+                    key_down = f"model.language_model.layers.{layer_idx}.experts.down_proj"
                     if key_down not in weight_info:
-                        key_down = f"model.layers.{layer_idx}.experts.down_proj.weight"
+                        key_down = f"model.language_model.layers.{layer_idx}.experts.down_proj.weight"
+                    if key_down not in weight_info:
+                        key_down = f"model.layers.{layer_idx}.experts.down_proj"
                     if key_down in weight_info:
                         fn = weight_info[key_down][0]["file"]
                         with safetensors.safe_open(fn, framework="np", device="cpu") as f:
