@@ -352,6 +352,7 @@ class Gemma4DecoderLayer(nnx.Module):
                 ep_size=getattr(config, "ep_size", 1),
                 weight_dtype=dtype,
                 dtype=dtype,
+                activation="gelu",
                 layer_id=layer_id,
                 quantization_config=getattr(config, "quantization_config", None),
             )
@@ -429,10 +430,10 @@ class Gemma4DecoderLayer(nnx.Module):
             expert_ids = jax.sharding.reshard(topk_ids, P(None))
         else:
             mlp_input = self.pre_feedforward_layernorm(hidden_states)
-            mlp_output = self.mlp(mlp_input)
-            hidden_states = self.post_feedforward_layernorm(mlp_output)
+            hidden_states = self.mlp(mlp_input)
 
-        outputs = residual + hidden_states
+        mlp_output = self.post_feedforward_layernorm(hidden_states)
+        outputs = residual + mlp_output
         outputs = outputs * self.layer_scalar.value
 
         mlp_callback_flag = precision_tracer.jit_pure_callback_record(
