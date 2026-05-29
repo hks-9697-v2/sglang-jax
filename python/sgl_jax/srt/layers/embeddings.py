@@ -222,35 +222,26 @@ class RotaryEmbedding:
         key: jax.Array,
     ) -> tuple[jax.Array, jax.Array]:
         positions = positions.flatten()  # [num_tokens]
+        num_tokens = positions.shape[0]
 
         inv_freq = jnp.asarray(self._inv_freq_np, dtype=self.dtype)
-
-        # Compute freqs = positions * inv_freq
         freqs = jnp.einsum("n,d->nd", positions.astype(jnp.float32), inv_freq)
+
+        query_shape = query.shape
+        key_shape = key.shape
+        query = query.reshape(num_tokens, -1, self.head_size)
+        key = key.reshape(num_tokens, -1, self.head_size)
+
+        if self.rotary_dim < self.head_size:
+            # Match official tpu-inference padding alignment for partial RoPE
+            nope_angles = self.head_size // 2 - (self.rotary_dim // 2)
+            freqs = jnp.pad(freqs, ((0, 0), (0, nope_angles)), mode="constant", constant_values=0.0)
 
         cos = jnp.cos(freqs).astype(self.dtype)
         sin = jnp.sin(freqs).astype(self.dtype)
 
-        query_shape = query.shape
-        num_tokens = positions.shape[0]
-        query = query.reshape(num_tokens, -1, self.head_size)
-        query_rot = query[..., : self.rotary_dim]
-        query_rot = apply_rotary_emb(query_rot, cos, sin, self.is_neox_style)
-        if self.rotary_dim < self.head_size:
-            query_pass = query[..., self.rotary_dim :]
-            query = jnp.concatenate((query_rot, query_pass), axis=-1).reshape(query_shape)
-        else:
-            query = query_rot.reshape(query_shape)
-
-        key_shape = key.shape
-        key = key.reshape(num_tokens, -1, self.head_size)
-        key_rot = key[..., : self.rotary_dim]
-        key_rot = apply_rotary_emb(key_rot, cos, sin, self.is_neox_style)
-        if self.rotary_dim < self.head_size:
-            key_pass = key[..., self.rotary_dim :]
-            key = jnp.concatenate((key_rot, key_pass), axis=-1).reshape(key_shape)
-        else:
-            key = key_rot.reshape(key_shape)
+        query = apply_rotary_emb(query, cos, sin, self.is_neox_style).reshape(query_shape)
+        key = apply_rotary_emb(key, cos, sin, self.is_neox_style).reshape(key_shape)
 
         return query, key
 
