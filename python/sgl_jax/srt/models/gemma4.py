@@ -15,6 +15,7 @@ from sgl_jax.srt.layers.embeddings import Embed, ParallelLMHead, get_rope
 from sgl_jax.srt.layers.layernorm import GemmaRMSNorm, RMSNorm
 from sgl_jax.srt.layers.linear import LinearBase
 from sgl_jax.srt.layers.logits_processor import LogitsMetadata, LogitsProcessor
+from sgl_jax.srt.eplb.expert_location import topk_ids_logical_to_physical
 from sgl_jax.srt.layers.moe import EPMoE, GateLogit, TopK
 from sgl_jax.srt.layers.radix_attention import RadixAttention
 from sgl_jax.srt.mem_cache.memory_pool import KVCache
@@ -418,9 +419,13 @@ class Gemma4DecoderLayer(nnx.Module):
             hidden_states_1 = self.post_feedforward_layernorm_1(hidden_states_1)
 
             router_logits = self.router(hidden_states)
-            topk_weights, topk_ids = self.topk(router_logits, dispatch_info=getattr(forward_batch, "expert_location_metadata", None))
+            topk_weights, topk_ids = self.topk(router_logits, dispatch_info=None)
             expert_scales = self.router.per_expert_scale.value.at[topk_ids].get(out_sharding=NamedSharding(self.mesh, P("data")))
             topk_weights = topk_weights * expert_scales
+
+            dispatch_info = getattr(forward_batch, "expert_location_metadata", None)
+            if dispatch_info is not None:
+                topk_ids = topk_ids_logical_to_physical(topk_ids, dispatch_info, self.layer_id)
 
             hidden_states_2 = self.pre_feedforward_layernorm_2(hidden_states)
             hidden_states_2 = self.experts(hidden_states_2, topk_weights, topk_ids)
