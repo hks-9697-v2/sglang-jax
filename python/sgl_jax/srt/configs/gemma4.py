@@ -8,6 +8,12 @@ class Gemma4Config(PretrainedConfig):
         if isinstance(text_config, dict):
             text_config = PretrainedConfig(**text_config)
         self.text_config = text_config
+        if self.text_config is not None:
+            tc = self.text_config
+            tc.swa_head_dim = getattr(tc, "head_dim", None)
+            tc.head_dim = getattr(tc, "global_head_dim", tc.swa_head_dim)
+            tc.swa_num_key_value_heads = getattr(tc, "num_key_value_heads", None)
+            tc.num_key_value_heads = getattr(tc, "num_global_key_value_heads", tc.swa_num_key_value_heads)
 
         if isinstance(vision_config, dict):
             vision_config = PretrainedConfig(**vision_config)
